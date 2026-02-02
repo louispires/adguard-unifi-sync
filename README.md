@@ -37,7 +37,12 @@ There are two primary execution modes controlled by environment variables:
 | `ENTRYPOINT_TRACE` | No | `true` to enable shell `set -x` tracing for entrypoint debugging |
 
 ## CLI Flags (Alternative to Env Vars when running script directly)
-```
+```python
+ENV_NAME=".venv-adguardUnifiSync"
+python3 -m venv "$ENV_NAME"
+source "$ENV_NAME/bin/activate"
+pip install --quiet -r requirements.txt
+
 python unifi_adguard_client_sync.py \
   --unifi-url https://controller.example \
   --unifi-username admin \
@@ -46,6 +51,9 @@ python unifi_adguard_client_sync.py \
   --adguard-username admin \
   --adguard-password secret \
   --ignored-networks "Guest,IoT"
+
+deactivate 2>/dev/null || true
+rm -rf "$ENV_NAME"
 ```
 
 ## Docker Build & Run
