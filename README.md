@@ -26,8 +26,9 @@ There are two primary execution modes controlled by environment variables:
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `UNIFI_URL` | Yes | Base URL of Unifi OS (e.g. `https://controller.local`) |
-| `UNIFI_USERNAME` | Yes | Unifi username |
-| `UNIFI_PW` | Yes | Unifi password (or use `--unifi-password`) |
+| `UNIFI_API_KEY` | Yes* | Unifi API key. Generate in UniFi OS → Settings → Control Plane → Integrations. Preferred over username+password. |
+| `UNIFI_USERNAME` | Yes* | Unifi username. Not required when `UNIFI_API_KEY` is set. |
+| `UNIFI_PW` | Yes* | Unifi password. Not required when `UNIFI_API_KEY` is set. |
 | `ADGUARD_URL` | Yes | Base URL of AdGuard Home (e.g. `http://adguard:3000`) |
 | `ADGUARD_USERNAME` | Yes | AdGuard username |
 | `ADGUARD_PW` | Yes | AdGuard password (or use `--adguard-password`) |
@@ -35,6 +36,8 @@ There are two primary execution modes controlled by environment variables:
 | `CRON` | No | CRON expression for scheduled runs (e.g. `*/15 * * * *`) |
 | `RUN_ON_START` | No | `true` to force an immediate sync before scheduling |
 | `ENTRYPOINT_TRACE` | No | `true` to enable shell `set -x` tracing for entrypoint debugging |
+
+*Unifi auth: supply either `UNIFI_API_KEY` **or** `UNIFI_USERNAME` + `UNIFI_PW`.
 
 ## CLI Flags (Alternative to Env Vars when running script directly)
 ```python
@@ -63,7 +66,18 @@ docker build -t adguard-unifi-sync:latest .
 ```
 
 ### One-Off Run (Single Execution)
-Runs once then exits:
+Runs once then exits (API key auth — recommended):
+```bash
+docker run --rm \
+  -e UNIFI_URL=https://10.0.0.1 \
+  -e UNIFI_API_KEY=your-api-key \
+  -e ADGUARD_URL=http://10.0.0.48 \
+  -e ADGUARD_USERNAME=admin \
+  -e ADGUARD_PW=changeme \
+  adguard-unifi-sync:latest
+```
+
+Or with username/password:
 ```bash
 docker run --rm \
   -e UNIFI_URL=https://10.0.0.1 \
@@ -79,8 +93,7 @@ docker run --rm \
 ```bash
 docker run --rm \
   -e UNIFI_URL=https://10.0.0.1 \
-  -e UNIFI_USERNAME=admin \
-  -e UNIFI_PW=changeme \
+  -e UNIFI_API_KEY=your-api-key \
   -e ADGUARD_URL=http://10.0.0.48 \
   -e ADGUARD_USERNAME=admin \
   -e ADGUARD_PW=changeme \
@@ -105,8 +118,7 @@ services:
     restart: always
     environment:
       UNIFI_URL: https://10.0.0.1
-      UNIFI_USERNAME: admin
-      UNIFI_PW: changeme
+      UNIFI_API_KEY: your-api-key   # preferred; or use UNIFI_USERNAME + UNIFI_PW
       ADGUARD_URL: http://10.0.0.48
       ADGUARD_USERNAME: admin
       ADGUARD_PW: changeme

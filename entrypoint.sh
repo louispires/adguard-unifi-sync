@@ -42,6 +42,7 @@ if [ -n "${CRON}" ]; then
 SHELL=/bin/sh
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 UNIFI_URL=${UNIFI_URL:-}
+UNIFI_API_KEY=${UNIFI_API_KEY:-}
 UNIFI_USERNAME=${UNIFI_USERNAME:-}
 UNIFI_PW=${UNIFI_PW:-}
 ADGUARD_URL=${ADGUARD_URL:-}

@@ -5,9 +5,13 @@ Using a MAC Address as a primary identifier, this script will sync the IP Addres
 
 Usage:
     unifi_adguard_client_sync.py \
-        --unifi-url URL --unifi-username USER [--unifi-password PW] \
+        --unifi-url URL { --unifi-api-key KEY | --unifi-username USER [--unifi-password PW] } \
         --adguard-url URL --adguard-username USER [--adguard-password PW] \
         [--ignored-networks NET1 NET2]
+
+Unifi Authentication:
+    Either supply an API key (UNIFI_API_KEY / --unifi-api-key) or username+password.
+    API key is preferred: set it in UniFi OS under Settings > Control Plane > Integrations.
 
 Passwords:
     You may supply passwords either via optional CLI flags or environment variables. If a flag is omitted,
@@ -32,9 +36,12 @@ def parse_args():
         description=("Sync active client data in Unifi OS with client records in AdGuard. "
                      "Passwords can be provided via flags or environment variables (UNIFI_PW, ADGUARD_PW)."))
     parser.add_argument("--unifi-url", dest="unifi_url", required=False, help="URL of Unifi Server (or set UNIFI_URL)")
+    parser.add_argument("--unifi-api-key", dest="unifi_api_key", required=False,
+                        help="Unifi API key (or set UNIFI_API_KEY). Preferred over username+password.")
     parser.add_argument("--unifi-username", dest="unifi_username", required=False,
-                        help="Username of Unifi user (or set UNIFI_USERNAME)")
-    parser.add_argument("--unifi-password", dest="unifi_password", required=False, help="Unifi password (or set UNIFI_PW)")
+                        help="Username of Unifi user (or set UNIFI_USERNAME). Not needed when --unifi-api-key is set.")
+    parser.add_argument("--unifi-password", dest="unifi_password", required=False,
+                        help="Unifi password (or set UNIFI_PW). Not needed when --unifi-api-key is set.")
     parser.add_argument("--adguard-url", dest="adguard_url", required=False, help="URL of AdGuard Server (or set ADGUARD_URL)")
     parser.add_argument("--adguard-username", dest="adguard_username", required=False,
                         help="Username of AdGuard user (or set ADGUARD_USERNAME)")
@@ -47,6 +54,8 @@ def parse_args():
     # allow using environment for all connection parameters
     if args.unifi_url is None:
         args.unifi_url = os.environ.get("UNIFI_URL")
+    if args.unifi_api_key is None:
+        args.unifi_api_key = os.environ.get("UNIFI_API_KEY")
     if args.unifi_username is None:
         args.unifi_username = os.environ.get("UNIFI_USERNAME")
     if args.unifi_password is None:
@@ -66,10 +75,11 @@ def parse_args():
     # validate presence for all required fields
     if not args.unifi_url:
         raise SystemExit("Unifi URL missing: supply --unifi-url or set UNIFI_URL")
-    if not args.unifi_username:
-        raise SystemExit("Unifi username missing: supply --unifi-username or set UNIFI_USERNAME")
-    if not args.unifi_password:
-        raise SystemExit("Unifi password missing: supply --unifi-password or set UNIFI_PW")
+    if not args.unifi_api_key:
+        if not args.unifi_username:
+            raise SystemExit("Unifi auth missing: supply --unifi-api-key (UNIFI_API_KEY) or --unifi-username (UNIFI_USERNAME)")
+        if not args.unifi_password:
+            raise SystemExit("Unifi password missing: supply --unifi-password or set UNIFI_PW")
     if not args.adguard_url:
         raise SystemExit("AdGuard URL missing: supply --adguard-url or set ADGUARD_URL")
     if not args.adguard_username:
@@ -114,8 +124,13 @@ def unifi_get_active_clients(s: requests.Session, arguments):
     c = clients.json()
     active_clients = dict()
     for client in c:
+        mac = client.get('mac')
+        if not mac:
+            continue
+        if not client.get('name'):
+            client['name'] = client.get('display_name')
         if client.get('network_name') not in arguments.ignored_networks:
-            active_clients[client['mac']] = client
+            active_clients[mac] = client
     return active_clients
 
 
@@ -139,27 +154,22 @@ def adguard_login(s: requests.Session, arguments):
     r.raise_for_status()
 
 
-def adguard_get_clients(s: requests.Session, arguments) -> dict[str, dict]:
+def adguard_get_clients(s: requests.Session, arguments) -> tuple[dict, dict, dict]:
     """
-    GET Request to retrieve all clients from Adguard. They are then organized
-    in a dictionary where the mac-address is a key. If they do not have a
-    mac-address, they are ignored. TODO: Should they be?
-    :param s:   requests.Session
-    :param arguments: argparse arguments
-    :return:    dict[str, dict] -> {mac_addr: client-obj}
+    GET all AdGuard clients, indexed three ways for conflict-free syncing.
+    :return: (by_mac, by_ip, by_name) — all dict[str, client-obj]
     """
     r = s.get("{}/control/clients".format(arguments.adguard_url))
     r.raise_for_status()
-    clients = dict()
-    if r.json()['clients'] is not None:
-        for client in r.json()['clients']:
-            mac = None
-            for item in client['ids']:
-                if len(item) == 17:
-                    mac = item
-            if mac is not None:
-                clients[mac] = client
-    return clients
+    by_mac, by_ip, by_name = {}, {}, {}
+    for client in r.json().get('clients') or []:
+        by_name[client['name']] = client
+        for id_item in client['ids']:
+            if len(id_item) == 17:
+                by_mac[id_item] = client
+            else:
+                by_ip[id_item] = client
+    return by_mac, by_ip, by_name
 
 
 def adguard_add_client(s: requests.Session, client, adguard_url):
@@ -171,40 +181,27 @@ def adguard_add_client(s: requests.Session, client, adguard_url):
     :param client:  unifi-os client-dict
     :return:        None
     """
-    if client.get("name") is None:
-        print("[sync] Client {} needs to be named.".format(client["display_name"]))
-    else:
-        print("[sync] Adding client {} to AdGuard".format(client["display_name"]))
-        ip = client.get('fixed_ip') or client.get('ip')
-        if not ip or not client.get('mac'):
-            print(f"Skipping {client.get('display_name', 'unknown')} due to missing IP or MAC")
-            return
+    print("[sync] Adding client {} to AdGuard".format(client["display_name"]))
+    ip = client.get('fixed_ip') or client.get('ip')
+    if not ip or not client.get('mac'):
+        print(f"[sync] Skipping {client.get('display_name', 'unknown')} — missing IP or MAC")
+        return
 
-        data = {
-            "name": client['name'],
-            "ids": [
-                ip,
-                client['mac']
-            ],
-            "use_global_settings": True,
-            # "filtering_enabled": True,
-            # "parental_enabled": True,
-            # "safebrowsing_enabled": True,
-            # "safe_search": {
-            #    "enabled": True,
-            #    "bing": True,
-            #    "duckduckgo": True,
-            #    "ecosia": True,
-            #    "google": True,
-            #    "pixabay": True,
-            #    "yandex": True,
-            #    "youtube": True
-            # },
-            "use_global_blocked_services": True,
-            "tags": [],
-        }
-        r = s.post("{}/control/clients/add".format(adguard_url), json=data)
-        r.raise_for_status()
+    data = {
+        "name": client['name'],
+        "ids": [
+            ip,
+            client['mac']
+        ],
+        "use_global_settings": True,
+        "use_global_blocked_services": True,
+        "tags": [],
+    }
+    r = s.post("{}/control/clients/add".format(adguard_url), json=data)
+    if not r.ok:
+        raise requests.HTTPError(
+            f"{r.status_code} {r.reason} adding '{client['name']}': {r.text}", response=r
+        )
 
 
 def adguard_delete_all(s: requests.Session, clients: list[str], adguard_url):
@@ -254,7 +251,10 @@ def adguard_update_client(s: requests.Session, client, old_name, adguard_url):
         }
     }
     r = s.post("{}/control/clients/update".format(adguard_url), json=data)
-    r.raise_for_status()
+    if not r.ok:
+        raise requests.HTTPError(
+            f"{r.status_code} {r.reason} updating '{old_name}': {r.text}", response=r
+        )
 
 
 def main():
@@ -264,41 +264,66 @@ def main():
     # create session
     session = requests.Session()
 
-    # login to unifi and retrieve clients
-    unifi_login(session, args)
+    # authenticate to unifi — API key takes precedence over username/password
+    if args.unifi_api_key:
+        session.headers.update({"X-API-KEY": args.unifi_api_key})
+        print("[sync] Using API key authentication for Unifi")
+    else:
+        unifi_login(session, args)
     print("[sync] Retrieving active clients from Unifi...")
     unifi_clients = unifi_get_active_clients(session, args)
 
     # login to adguard and retrieve clients
     adguard_login(session, args)
     print("[sync] Retrieving clients from AdGuard...")
-    adguard_clients = adguard_get_clients(session, args)
+    adguard_by_mac, adguard_by_ip, adguard_by_name = adguard_get_clients(session, args)
 
     # determine changes
     print("[sync] Calculating changes...")
-    unifi_active_client_macs = set(list(unifi_clients.keys()))
-    adguard_client_macs = set(list(adguard_clients.keys()))
+    unifi_active_client_macs = set(unifi_clients.keys())
+    adguard_client_macs = set(adguard_by_mac.keys())
     new_clients = unifi_active_client_macs - adguard_client_macs
     existing_clients = unifi_active_client_macs.intersection(adguard_client_macs)
+    added_clients = 0
     modified_clients = 0
+    failed_clients = 0
 
-    # make changes if necessary
-    if len(new_clients) > 0:
-        for c in new_clients:
-            adguard_add_client(session, unifi_clients[c], args.adguard_url)
-    if len(existing_clients) > 0:
-        for c in existing_clients:
-            ip = unifi_clients[c].get('fixed_ip') or unifi_clients[c].get('ip')
-            unifi_data = {ip, unifi_clients[c]['mac']}
-            if (unifi_data != set(adguard_clients[c]['ids'])) or unifi_clients[c]['name'] != adguard_clients[c]['name']:
+    # new clients — check for IP/name conflicts before adding
+    for c in new_clients:
+        unifi_client = unifi_clients[c]
+        ip = unifi_client.get('fixed_ip') or unifi_client.get('ip')
+        name = unifi_client.get('name')
+        conflicting = (adguard_by_ip.get(ip) or adguard_by_name.get(name)) if name else None
+        try:
+            if conflicting:
+                print(f"[sync] '{name}' conflicts with existing AdGuard client '{conflicting['name']}' — updating instead")
+                adguard_update_client(session, unifi_client, conflicting['name'], args.adguard_url)
                 modified_clients += 1
+            else:
+                adguard_add_client(session, unifi_client, args.adguard_url)
+                added_clients += 1
+        except Exception as e:
+            failed_clients += 1
+            print(f"[sync] Failed for client {unifi_client.get('display_name', c)}: {e}")
+
+    # existing clients (matched by MAC) — update if IP or name drifted
+    for c in existing_clients:
+        ip = unifi_clients[c].get('fixed_ip') or unifi_clients[c].get('ip')
+        unifi_data = {ip, unifi_clients[c]['mac']}
+        adguard_client = adguard_by_mac[c]
+        if (unifi_data != set(adguard_client['ids'])) or unifi_clients[c]['name'] != adguard_client['name']:
+            try:
                 print(f"[sync] Differences found for client {unifi_clients[c]['name']}, updating...")
-                adguard_update_client(session, unifi_clients[c], adguard_clients[c]['name'], args.adguard_url)
-                adguard_update_client(session, unifi_clients[c], adguard_clients[c]['name'], args.adguard_url)
-    if len(new_clients) == 0 and modified_clients == 0:
+                adguard_update_client(session, unifi_clients[c], adguard_client['name'], args.adguard_url)
+                modified_clients += 1
+            except Exception as e:
+                failed_clients += 1
+                print(f"[sync] Failed to update client {unifi_clients[c].get('display_name', c)}: {e}")
+
+    if added_clients == 0 and modified_clients == 0 and failed_clients == 0:
         print("[sync] No changes required.")
     else:
-        print("[sync] Changes made: {} added, {} modified.".format(len(new_clients), modified_clients))
+        print("[sync] Changes made: {} added, {} modified, {} failed.".format(added_clients, modified_clients, failed_clients))
     end_ts = datetime.now(tz=timezone.utc)
     print(f"[sync] End cycle at {end_ts}")
 
